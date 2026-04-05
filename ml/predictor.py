@@ -4,7 +4,7 @@ import os
 import joblib
 import pandas as pd
 
-from core.dataset import FEATURE_COLUMNS
+from core.dataset import FEATURE_COLUMNS, enrich_dataframe
 
 
 def _load_model_files(model_dir):
@@ -22,9 +22,11 @@ def predict_from_entry(entry_csv_path, model_dir="models", output_path=None):
     if df.empty:
         raise ValueError("出走表CSVが空です")
 
+    df = enrich_dataframe(df, is_result=False)
+
     for col in FEATURE_COLUMNS:
         if col not in df.columns:
-            df[col] = None
+            df[col] = 0
 
     X = df[FEATURE_COLUMNS].copy()
     result_df = df.copy()
@@ -40,7 +42,7 @@ def predict_from_entry(entry_csv_path, model_dir="models", output_path=None):
         X_model = X.copy()
         for col in feature_columns:
             if col not in X_model.columns:
-                X_model[col] = None
+                X_model[col] = 0
         X_model = X_model[feature_columns]
 
         if hasattr(model, "predict_proba"):
@@ -77,7 +79,7 @@ def predict_from_entry(entry_csv_path, model_dir="models", output_path=None):
 
     result_df = result_df.sort_values(
         by=["race_id", "pred_rank_in_race", "horse_no"],
-        ascending=[True, True, True]
+        ascending=[True, True, True],
     ).reset_index(drop=True)
 
     if output_path:

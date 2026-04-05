@@ -6,3 +6,4 @@ scikit-learn
 joblib
 selenium
 webdriver-manager
+tkcalendar

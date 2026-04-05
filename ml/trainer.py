@@ -9,7 +9,7 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
-from core.dataset import TARGET_COLUMNS, prepare_train_xy
+from core.dataset import TARGET_COLUMNS, enrich_dataframe, prepare_train_xy
 
 
 def _load_result_csvs(data_dir):
@@ -24,6 +24,8 @@ def _load_result_csvs(data_dir):
 
     if df.empty:
         raise ValueError("学習用データが空です")
+
+    df = enrich_dataframe(df, is_result=True)
 
     return df
 
@@ -52,10 +54,11 @@ def train_one_target(df, target_col, model_dir="models"):
         raise ValueError(f"{target_col}: 目的変数が1種類しかありません")
 
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
+        X,
+        y,
         test_size=0.25,
         random_state=42,
-        stratify=y
+        stratify=y,
     )
 
     model = _build_model()
