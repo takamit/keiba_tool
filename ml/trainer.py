@@ -1,109 +1,109 @@
-from __future__ import annotations
-
+﻿import glob
 import os
-from typing import Dict
 
 import joblib
 import pandas as pd
-from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder
 
-from config.settings import MODEL_DIR
-from core.dataset import prepare_learning_dataframe
+from core.dataset import TARGET_COLUMNS, prepare_train_xy
 
 
-FEATURE_COLUMNS = [
-    "track",
-    "weather",
-    "ground",
-    "jockey",
-    "race_class",
-    "frame",
-    "number",
-    "age",
-    "carried_weight",
-    "body_weight",
-    "body_weight_diff",
-    "odds",
-    "popularity",
-    "sex_code",
-]
+def _load_result_csvs(data_dir):
+    pattern = os.path.join(data_dir, "result_*.csv")
+    files = sorted(glob.glob(pattern))
+
+    if not files:
+        raise FileNotFoundError(f"result_*.csv が見つかりません: {data_dir}")
+
+    frames = [pd.read_csv(path) for path in files]
+    df = pd.concat(frames, ignore_index=True)
+
+    if df.empty:
+        raise ValueError("学習用データが空です")
+
+    return df
 
 
-class KeibaModelTrainer:
-    def train(self, df: pd.DataFrame, target_col: str = "target_top3") -> Dict:
-        if target_col not in df.columns:
-            raise ValueError(f"学習用ターゲット列がありません: {target_col}")
+def _build_model():
+    return Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("clf", RandomForestClassifier(
+            n_estimators=400,
+            max_depth=12,
+            min_samples_leaf=2,
+            random_state=42,
+            n_jobs=-1,
+            class_weight="balanced_subsample",
+        )),
+    ])
 
-        work = prepare_learning_dataframe(df)
-        work = work.dropna(subset=[target_col]).copy()
-        if len(work) < 30:
-            raise ValueError("学習データが少なすぎます。最低でも30頭分以上の結果データを集めてください。")
 
-        X = work[FEATURE_COLUMNS]
-        y = work[target_col]
+def train_one_target(df, target_col, model_dir="models"):
+    X, y = prepare_train_xy(df, target_col)
 
-        numeric_cols = [c for c in FEATURE_COLUMNS if c not in ["track", "weather", "ground", "jockey", "race_class"]]
-        categorical_cols = ["track", "weather", "ground", "jockey", "race_class"]
+    if len(X) < 50:
+        raise ValueError(f"{target_col}: 学習件数が少なすぎます")
 
-        preprocessor = ColumnTransformer(
-            transformers=[
-                (
-                    "num",
-                    Pipeline([
-                        ("imputer", SimpleImputer(strategy="median")),
-                    ]),
-                    numeric_cols,
-                ),
-                (
-                    "cat",
-                    Pipeline([
-                        ("imputer", SimpleImputer(strategy="most_frequent")),
-                        ("onehot", OneHotEncoder(handle_unknown="ignore")),
-                    ]),
-                    categorical_cols,
-                ),
-            ]
-        )
+    if y.nunique() < 2:
+        raise ValueError(f"{target_col}: 目的変数が1種類しかありません")
 
-        model = Pipeline(
-            steps=[
-                ("preprocessor", preprocessor),
-                (
-                    "classifier",
-                    RandomForestClassifier(
-                        n_estimators=300,
-                        max_depth=10,
-                        min_samples_leaf=2,
-                        random_state=42,
-                        class_weight="balanced",
-                    ),
-                ),
-            ]
-        )
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=0.25,
+        random_state=42,
+        stratify=y
+    )
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.25, random_state=42, stratify=y
-        )
-        model.fit(X_train, y_train)
-        pred = model.predict(X_test)
+    model = _build_model()
+    model.fit(X_train, y_train)
 
-        accuracy = float(accuracy_score(y_test, pred))
-        report = classification_report(y_test, pred, zero_division=0)
+    pred = model.predict(X_test)
+    acc = float(accuracy_score(y_test, pred))
+    f1 = float(f1_score(y_test, pred, zero_division=0))
 
-        model_path = os.path.join(MODEL_DIR, f"keiba_model_{target_col}.joblib")
-        joblib.dump(model, model_path)
+    auc = None
+    if hasattr(model, "predict_proba"):
+        try:
+            proba = model.predict_proba(X_test)[:, 1]
+            auc = float(roc_auc_score(y_test, proba))
+        except Exception:
+            auc = None
 
-        return {
-            "model_path": model_path,
-            "target": target_col,
-            "train_rows": len(X_train),
-            "test_rows": len(X_test),
-            "accuracy": accuracy,
-            "report": report,
-        }
+    os.makedirs(model_dir, exist_ok=True)
+    model_path = os.path.join(model_dir, f"{target_col}.joblib")
+
+    joblib.dump({
+        "target_col": target_col,
+        "feature_columns": list(X.columns),
+        "model": model,
+    }, model_path)
+
+    return {
+        "target_col": target_col,
+        "model_path": model_path,
+        "rows": int(len(X)),
+        "positive_rate": float(y.mean()),
+        "accuracy": acc,
+        "f1": f1,
+        "auc": auc,
+    }
+
+
+def train_all_models(data_dir="data", model_dir="models"):
+    df = _load_result_csvs(data_dir)
+    summaries = []
+
+    for target_col in TARGET_COLUMNS:
+        try:
+            summaries.append(train_one_target(df, target_col=target_col, model_dir=model_dir))
+        except Exception as e:
+            summaries.append({
+                "target_col": target_col,
+                "error": str(e),
+            })
+
+    return summaries

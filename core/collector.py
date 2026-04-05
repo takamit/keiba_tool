@@ -1,109 +1,110 @@
-import os
+﻿import os
+import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import List
 
 import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
-from bs4 import BeautifulSoup
-
-from config.settings import CACHE_DIR, MAX_WORKERS, REQUEST_RETRY, REQUEST_TIMEOUT, SLEEP_BETWEEN_RETRY, TRACK_CANDIDATES
-from core.parser import parse_entry_table, parse_race_meta, parse_result_table
-from utils.logger import get_logger
-
-logger = get_logger()
+from config import CACHE_DIR, HEADLESS, REQUEST_RETRY, REQUEST_TIMEOUT, SLEEP_BETWEEN_RETRY
 
 
-class RaceDataCollector:
-    def __init__(self):
-        os.makedirs(CACHE_DIR, exist_ok=True)
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
 
-    def _cache_path(self, race_id: str, mode: str) -> str:
-        return os.path.join(CACHE_DIR, f"{mode}_{race_id}.html")
 
-    def _fetch_html(self, url: str, cache_path: str) -> Optional[str]:
-        if os.path.exists(cache_path):
-            with open(cache_path, "r", encoding="utf-8") as f:
-                return f.read()
+def _ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        for retry in range(1, REQUEST_RETRY + 1):
-            try:
-                res = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-                res.raise_for_status()
-                res.encoding = res.apparent_encoding
-                html = res.text
-                with open(cache_path, "w", encoding="utf-8") as f:
-                    f.write(html)
-                return html
-            except Exception as exc:
-                logger.warning("HTML取得失敗 %s retry=%s/%s", url, retry, REQUEST_RETRY)
-                logger.warning("detail: %s", exc)
-                time.sleep(SLEEP_BETWEEN_RETRY)
-        return None
 
-    def _extract_track(self, html: str) -> str:
-        soup = BeautifulSoup(html, "lxml")
-        text = soup.get_text(" ", strip=True)
-        for name in TRACK_CANDIDATES:
-            if name in text:
-                return name
-        return "不明"
+def _cache_path(name: str) -> str:
+    _ensure_dir(CACHE_DIR)
+    safe = re.sub(r"[^0-9A-Za-z_\-]", "_", name)
+    return os.path.join(CACHE_DIR, f"{safe}.html")
 
-    def fetch_entry(self, race_id: str) -> Optional[Dict]:
+
+def _build_driver():
+    options = Options()
+    if HEADLESS:
+        options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1600,1200")
+    options.add_argument("--lang=ja-JP")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
+
+
+def get_race_ids(date: str) -> List[str]:
+    if not re.fullmatch(r"\d{8}", date):
+        raise ValueError("日付は YYYYMMDD 8桁で入力してください")
+
+    url = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date}"
+    driver = _build_driver()
+
+    try:
+        driver.get(url)
+        time.sleep(3)
+
+        html = driver.page_source
+
+        cache_path = _cache_path(f"race_list_{date}")
+        with open(cache_path, "w", encoding="utf-8") as f:
+            f.write(html)
+
+        race_ids = sorted(set(re.findall(r"race_id=(\d{12})", html)))
+
+        if not race_ids:
+            raise ValueError(
+                f"race_idを取得できませんでした: {date}\n"
+                f"確認ファイル: {cache_path}"
+            )
+
+        return race_ids
+    finally:
+        driver.quit()
+
+
+def fetch_race_page(race_id: str, mode: str = "entry", use_cache: bool = True) -> str:
+    if not re.fullmatch(r"\d{12}", race_id):
+        raise ValueError(f"race_id形式が不正です: {race_id}")
+
+    if mode == "entry":
         url = f"https://race.netkeiba.com/race/shutuba.html?race_id={race_id}"
-        html = self._fetch_html(url, self._cache_path(race_id, "entry"))
-        if not html:
-            return None
-
-        meta = parse_race_meta(html)
-        horses = parse_entry_table(html)
-        return {
-            "race_id": race_id,
-            "track": self._extract_track(html),
-            **meta,
-            "horses": horses,
-        }
-
-    def fetch_result(self, race_id: str) -> Optional[Dict]:
+    elif mode == "result":
         url = f"https://race.netkeiba.com/race/result.html?race_id={race_id}"
-        html = self._fetch_html(url, self._cache_path(race_id, "result"))
-        if not html:
-            return None
+    else:
+        raise ValueError(f"不正なmodeです: {mode}")
 
-        meta = parse_race_meta(html)
-        horses = parse_result_table(html)
-        return {
-            "race_id": race_id,
-            "track": self._extract_track(html),
-            **meta,
-            "horses": horses,
-        }
+    cache_name = f"{mode}_{race_id}"
+    cache_path = _cache_path(cache_name)
 
-    def collect_entries(self, date: str, race_ids: List[str]) -> Dict:
-        return self._collect(date, race_ids, self.fetch_entry)
+    if use_cache and os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return f.read()
 
-    def collect_results(self, date: str, race_ids: List[str]) -> Dict:
-        return self._collect(date, race_ids, self.fetch_result)
+    last_error = None
 
-    def _collect(self, date: str, race_ids: List[str], fetch_func) -> Dict:
-        results = []
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = [executor.submit(fetch_func, race_id) for race_id in race_ids]
-            for future in as_completed(futures):
-                data = future.result()
-                if data:
-                    results.append(data)
+    for _ in range(REQUEST_RETRY):
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            res.raise_for_status()
+            res.encoding = res.apparent_encoding or "utf-8"
+            html = res.text
 
-        results.sort(key=lambda x: x["race_id"])
-        if not results:
-            raise ValueError("レースデータを1件も取得できませんでした")
+            with open(cache_path, "w", encoding="utf-8") as f:
+                f.write(html)
 
-        grouped: Dict[str, List[Dict]] = {}
-        for race in results:
-            grouped.setdefault(race["track"], []).append(race)
+            return html
+        except Exception as e:
+            last_error = e
+            time.sleep(SLEEP_BETWEEN_RETRY)
 
-        return {
-            "date": date,
-            "tracks": [{"name": k, "races": v} for k, v in grouped.items()],
-        }
+    raise RuntimeError(f"レースページ取得失敗: race_id={race_id}, mode={mode}, error={last_error}")

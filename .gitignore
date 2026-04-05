@@ -1,10 +1,9 @@
-venv/
+﻿venv/
 __pycache__/
 *.pyc
 cache/
 logs/
-data/*.json
-data/*.csv
-models/*.joblib
+models/
+data/
 .DS_Store
 Thumbs.db

@@ -1,5 +1,5 @@
-from ui.gui import AppGUI
-
+﻿from ui.gui import AppGUI
 
 if __name__ == "__main__":
-    AppGUI().run()
+    app = AppGUI()
+    app.mainloop()

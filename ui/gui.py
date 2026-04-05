@@ -1,147 +1,233 @@
-from __future__ import annotations
-
-import os
+﻿import os
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from core.controller import Controller
+from config import (
+    APP_TITLE,
+    DATA_DIR,
+    MODEL_DIR,
+    CACHE_DIR,
+    LOG_DIR,
+    ENTRY_FILE_PATTERN,
+    RESULT_FILE_PATTERN,
+    PREDICT_FILE_PATTERN,
+)
+from core import collector, dataset, parser
+from ml import predictor, trainer
 
 
-class AppGUI:
+class AppGUI(tk.Tk):
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("競馬予想ツール")
-        self.root.geometry("900x650")
+        super().__init__()
+        self.title(APP_TITLE)
+        self.geometry("980x760")
 
-        self.controller = Controller()
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        os.makedirs(LOG_DIR, exist_ok=True)
 
-        self.fetch_date_var = tk.StringVar()
-        self.result_dates_var = tk.StringVar()
-        self.predict_date_var = tk.StringVar()
-        self.model_path_var = tk.StringVar()
-        self.target_var = tk.StringVar(value="target_top3")
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill=tk.BOTH, expand=True)
 
-        self._build_layout()
+        self.collect_tab = ttk.Frame(notebook)
+        self.train_tab = ttk.Frame(notebook)
+        self.predict_tab = ttk.Frame(notebook)
 
-    def _build_layout(self):
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        notebook.add(self.collect_tab, text="データ取得")
+        notebook.add(self.train_tab, text="AI学習")
+        notebook.add(self.predict_tab, text="予測")
 
-        fetch_tab = ttk.Frame(notebook)
-        train_tab = ttk.Frame(notebook)
-        predict_tab = ttk.Frame(notebook)
+        self._build_collect_tab()
+        self._build_train_tab()
+        self._build_predict_tab()
 
-        notebook.add(fetch_tab, text="1. データ取得")
-        notebook.add(train_tab, text="2. 学習")
-        notebook.add(predict_tab, text="3. 予測")
+    def _build_collect_tab(self):
+        frame = ttk.Frame(self.collect_tab, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
 
-        self._build_fetch_tab(fetch_tab)
-        self._build_train_tab(train_tab)
-        self._build_predict_tab(predict_tab)
+        ttk.Label(frame, text="日付（YYYYMMDD またはカンマ区切り）").pack(anchor=tk.W)
+        self.collect_date_entry = ttk.Entry(frame)
+        self.collect_date_entry.pack(fill=tk.X, pady=5)
 
-        log_frame = ttk.LabelFrame(self.root, text="実行ログ")
-        log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.log_text = tk.Text(log_frame, wrap="word", height=14)
-        self.log_text.pack(fill="both", expand=True, padx=8, pady=8)
-
-    def _build_fetch_tab(self, parent):
-        frame = ttk.Frame(parent, padding=12)
-        frame.pack(fill="both", expand=True)
-
-        ttk.Label(frame, text="単日取得日付 (YYYYMMDD)").grid(row=0, column=0, sticky="w", pady=6)
-        ttk.Entry(frame, textvariable=self.fetch_date_var, width=20).grid(row=0, column=1, sticky="w")
-
-        ttk.Button(frame, text="出走表を取得", command=self.fetch_entry).grid(row=1, column=0, pady=8, sticky="w")
-        ttk.Button(frame, text="結果を取得", command=self.fetch_result).grid(row=1, column=1, pady=8, sticky="w")
-
-        ttk.Separator(frame).grid(row=2, column=0, columnspan=3, sticky="ew", pady=15)
-
-        ttk.Label(frame, text="学習用の過去日付一覧（カンマ区切り）").grid(row=3, column=0, sticky="w", pady=6)
-        ttk.Entry(frame, textvariable=self.result_dates_var, width=60).grid(row=3, column=1, columnspan=2, sticky="ew")
-        ttk.Button(frame, text="複数日の結果をまとめて取得", command=self.fetch_multi_results).grid(row=4, column=0, columnspan=2, sticky="w", pady=8)
-
-        frame.columnconfigure(2, weight=1)
-
-    def _build_train_tab(self, parent):
-        frame = ttk.Frame(parent, padding=12)
-        frame.pack(fill="both", expand=True)
-
-        ttk.Label(frame, text="学習ターゲット").grid(row=0, column=0, sticky="w", pady=6)
-        ttk.Combobox(
+        ttk.Button(
             frame,
-            textvariable=self.target_var,
-            values=["target_top3", "target_win"],
-            state="readonly",
-            width=20,
-        ).grid(row=0, column=1, sticky="w")
+            text="出走＋結果取得",
+            command=lambda: self._run_in_thread(self.run_collect)
+        ).pack(pady=10)
 
-        ttk.Label(frame, text="data/result_*.csv を自動で連結して学習します").grid(row=1, column=0, columnspan=2, sticky="w", pady=6)
-        ttk.Button(frame, text="学習開始", command=self.train_model).grid(row=2, column=0, sticky="w", pady=8)
+        self.collect_log = tk.Text(frame, height=30)
+        self.collect_log.pack(fill=tk.BOTH, expand=True)
 
-    def _build_predict_tab(self, parent):
-        frame = ttk.Frame(parent, padding=12)
-        frame.pack(fill="both", expand=True)
+    def _build_train_tab(self):
+        frame = ttk.Frame(self.train_tab, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="予測日付 (YYYYMMDD)").grid(row=0, column=0, sticky="w", pady=6)
-        ttk.Entry(frame, textvariable=self.predict_date_var, width=20).grid(row=0, column=1, sticky="w")
+        ttk.Label(frame, text="学習元フォルダ（result_*.csv）").pack(anchor=tk.W)
+        self.train_data_dir_entry = ttk.Entry(frame)
+        self.train_data_dir_entry.insert(0, DATA_DIR)
+        self.train_data_dir_entry.pack(fill=tk.X, pady=5)
 
-        ttk.Label(frame, text="学習済みモデルのパス").grid(row=1, column=0, sticky="w", pady=6)
-        ttk.Entry(frame, textvariable=self.model_path_var, width=70).grid(row=1, column=1, sticky="ew")
+        ttk.Label(frame, text="モデル保存先フォルダ").pack(anchor=tk.W)
+        self.model_dir_entry = ttk.Entry(frame)
+        self.model_dir_entry.insert(0, MODEL_DIR)
+        self.model_dir_entry.pack(fill=tk.X, pady=5)
 
-        ttk.Button(frame, text="予測CSVを出力", command=self.predict).grid(row=2, column=0, sticky="w", pady=8)
-        ttk.Label(frame, text="空なら models/keiba_model_target_top3.joblib を使います").grid(row=2, column=1, sticky="w")
+        ttk.Button(
+            frame,
+            text="AI学習開始（複数モデル）",
+            command=lambda: self._run_in_thread(self.run_train)
+        ).pack(pady=10)
 
-        frame.columnconfigure(1, weight=1)
+        self.train_log = tk.Text(frame, height=28)
+        self.train_log.pack(fill=tk.BOTH, expand=True)
 
-    def _validate_date(self, value: str) -> str:
-        value = value.strip()
-        if len(value) != 8 or not value.isdigit():
-            raise ValueError("日付は YYYYMMDD の8桁で入力してください")
-        return value
+    def _build_predict_tab(self):
+        frame = ttk.Frame(self.predict_tab, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
 
-    def _append_log(self, text: str):
-        self.log_text.insert("end", text + "\n")
-        self.log_text.see("end")
-        self.root.update_idletasks()
+        ttk.Label(frame, text="予測対象日（YYYYMMDD）").pack(anchor=tk.W)
+        self.predict_date_entry = ttk.Entry(frame)
+        self.predict_date_entry.pack(fill=tk.X, pady=5)
 
-    def fetch_entry(self):
-        date = self._validate_date(self.fetch_date_var.get())
-        result = self.controller.collect_entry_by_date(date)
-        self._append_log(f"出走表取得完了: {date} -> {result['csv']}")
-        messagebox.showinfo("完了", f"出走表を保存しました\n{result['csv']}")
+        ttk.Label(frame, text="使用するモデルフォルダ").pack(anchor=tk.W)
+        self.predict_model_dir_entry = ttk.Entry(frame)
+        self.predict_model_dir_entry.insert(0, MODEL_DIR)
+        self.predict_model_dir_entry.pack(fill=tk.X, pady=5)
 
-    def fetch_result(self):
-        date = self._validate_date(self.fetch_date_var.get())
-        result = self.controller.collect_result_by_date(date)
-        self._append_log(f"結果取得完了: {date} -> {result['csv']}")
-        messagebox.showinfo("完了", f"結果を保存しました\n{result['csv']}")
+        ttk.Button(
+            frame,
+            text="予測実行",
+            command=lambda: self._run_in_thread(self.run_predict)
+        ).pack(pady=10)
 
-    def fetch_multi_results(self):
-        raw = self.result_dates_var.get().strip()
-        dates = [self._validate_date(x) for x in raw.split(",") if x.strip()]
+        self.predict_log = tk.Text(frame, height=28)
+        self.predict_log.pack(fill=tk.BOTH, expand=True)
+
+    def _run_in_thread(self, func):
+        threading.Thread(target=func, daemon=True).start()
+
+    def _log(self, widget, msg: str):
+        widget.insert(tk.END, msg + "\n")
+        widget.see(tk.END)
+        self.update_idletasks()
+
+    def run_collect(self):
+        raw = self.collect_date_entry.get().strip()
+        if not raw:
+            messagebox.showerror("エラー", "日付を入力してください")
+            return
+
+        dates = [x.strip() for x in raw.split(",") if x.strip()]
         if not dates:
-            raise ValueError("日付を1件以上入力してください")
-        outputs = self.controller.collect_results_by_dates(dates)
-        self._append_log(f"複数日結果取得完了: {len(outputs)}日")
-        messagebox.showinfo("完了", f"{len(outputs)}日分の結果CSVを保存しました")
+            messagebox.showerror("エラー", "日付を正しく入力してください")
+            return
 
-    def train_model(self):
-        result = self.controller.train_from_saved_results(target_col=self.target_var.get())
-        self.model_path_var.set(result["model_path"])
-        self._append_log(f"学習完了: accuracy={result['accuracy']:.4f}")
-        self._append_log(result["report"])
-        messagebox.showinfo("学習完了", f"モデル保存先\n{result['model_path']}")
-
-    def predict(self):
-        date = self._validate_date(self.predict_date_var.get())
-        model_path = self.model_path_var.get().strip() or os.path.join("models", "keiba_model_target_top3.joblib")
-        result = self.controller.predict_from_saved_entry(date, model_path)
-        self._append_log(f"予測完了: {date} -> {result['csv']}")
-        messagebox.showinfo("予測完了", f"予測CSVを保存しました\n{result['csv']}")
-
-    def run(self):
         try:
-            self.root.mainloop()
-        except Exception as exc:
-            messagebox.showerror("エラー", str(exc))
-            raise
+            for date in dates:
+                self._log(self.collect_log, f"=== {date} 開始 ===")
+                race_ids = collector.get_race_ids(date)
+                self._log(self.collect_log, f"race_id数: {len(race_ids)}")
+
+                entry_rows = []
+                result_rows = []
+
+                for race_id in race_ids:
+                    entry_html = collector.fetch_race_page(race_id, mode="entry", use_cache=False)
+                    entry_rows.extend(parser.parse_entry(entry_html, race_id))
+
+                    try:
+                        result_html = collector.fetch_race_page(race_id, mode="result", use_cache=False)
+                        result_rows.extend(parser.parse_result(result_html, race_id))
+                    except Exception:
+                        pass
+
+                if entry_rows:
+                    entry_df = dataset.build_entry_df(entry_rows)
+                    entry_path = os.path.join(DATA_DIR, ENTRY_FILE_PATTERN.format(date=date))
+                    entry_df.to_csv(entry_path, index=False, encoding="utf-8-sig")
+                    self._log(self.collect_log, f"出走表保存: {entry_path} / {len(entry_df)}件")
+                else:
+                    self._log(self.collect_log, "出走表データなし")
+
+                if result_rows:
+                    result_df = dataset.build_result_df(result_rows)
+                    result_path = os.path.join(DATA_DIR, RESULT_FILE_PATTERN.format(date=date))
+                    result_df.to_csv(result_path, index=False, encoding="utf-8-sig")
+                    self._log(self.collect_log, f"結果保存: {result_path} / {len(result_df)}件")
+                else:
+                    self._log(self.collect_log, "結果データなし（未来日または未確定の可能性あり）")
+
+                self._log(self.collect_log, f"=== {date} 完了 ===\n")
+
+            messagebox.showinfo("完了", "データ取得が完了しました")
+        except Exception as e:
+            messagebox.showerror("エラー", str(e))
+
+    def run_train(self):
+        data_dir = self.train_data_dir_entry.get().strip() or DATA_DIR
+        model_dir = self.model_dir_entry.get().strip() or MODEL_DIR
+
+        try:
+            self._log(self.train_log, "学習開始...")
+            summaries = trainer.train_all_models(data_dir=data_dir, model_dir=model_dir)
+
+            self._log(self.train_log, "=== 学習結果 ===")
+            for s in summaries:
+                if "error" in s:
+                    self._log(self.train_log, f"[NG] {s['target_col']} : {s['error']}")
+                else:
+                    auc_text = "None" if s["auc"] is None else f"{s['auc']:.4f}"
+                    self._log(
+                        self.train_log,
+                        f"[OK] {s['target_col']} | rows={s['rows']} | "
+                        f"positive_rate={s['positive_rate']:.4f} | "
+                        f"acc={s['accuracy']:.4f} | f1={s['f1']:.4f} | auc={auc_text}"
+                    )
+                    self._log(self.train_log, f"保存: {s['model_path']}")
+
+            messagebox.showinfo("完了", "AI学習が完了しました")
+        except Exception as e:
+            messagebox.showerror("エラー", str(e))
+
+    def run_predict(self):
+        date = self.predict_date_entry.get().strip()
+        model_dir = self.predict_model_dir_entry.get().strip() or MODEL_DIR
+
+        if not date:
+            messagebox.showerror("エラー", "予測対象日を入力してください")
+            return
+
+        try:
+            self._log(self.predict_log, f"{date} の出走表取得中...")
+            race_ids = collector.get_race_ids(date)
+            self._log(self.predict_log, f"race_id数: {len(race_ids)}")
+
+            entry_rows = []
+            for race_id in race_ids:
+                html = collector.fetch_race_page(race_id, mode="entry", use_cache=False)
+                entry_rows.extend(parser.parse_entry(html, race_id))
+
+            if not entry_rows:
+                raise ValueError("出走表データを取得できませんでした")
+
+            entry_df = dataset.build_entry_df(entry_rows)
+            entry_path = os.path.join(DATA_DIR, ENTRY_FILE_PATTERN.format(date=date))
+            entry_df.to_csv(entry_path, index=False, encoding="utf-8-sig")
+            self._log(self.predict_log, f"出走表保存: {entry_path}")
+
+            output_path = os.path.join(DATA_DIR, PREDICT_FILE_PATTERN.format(date=date))
+            result_df = predictor.predict_from_entry(
+                entry_csv_path=entry_path,
+                model_dir=model_dir,
+                output_path=output_path
+            )
+
+            self._log(self.predict_log, f"予測保存: {output_path}")
+            self._log(self.predict_log, f"予測件数: {len(result_df)}")
+            self._log(self.predict_log, "score_composite と pred_rank_in_race を確認してください")
+
+            messagebox.showinfo("完了", "予測が完了しました")
+        except Exception as e:
+            messagebox.showerror("エラー", str(e))

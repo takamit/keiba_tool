@@ -1,7 +1,8 @@
-requests
+﻿requests
 beautifulsoup4
 lxml
-selenium
 pandas
 scikit-learn
 joblib
+selenium
+webdriver-manager
