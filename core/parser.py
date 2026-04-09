@@ -1,4 +1,4 @@
-﻿import re
+import re
 from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
@@ -142,6 +142,7 @@ def parse_entry(html: str, race_id: str) -> List[Dict]:
     idx_sex_age = _find_col(header_map, ["性齢"])
     idx_carried_weight = _find_col(header_map, ["斤量"])
     idx_jockey = _find_col(header_map, ["騎手"])
+    idx_trainer = _find_col(header_map, ["調教師", "厩舎"])
     idx_body_weight = _find_col(header_map, ["馬体重(増減)", "馬体重"])
     idx_popularity = _find_col(header_map, ["人気"])
     idx_odds = _find_col(header_map, ["オッズ", "単勝オッズ"])
@@ -163,6 +164,7 @@ def parse_entry(html: str, race_id: str) -> List[Dict]:
         sex, age = _split_sex_age(sex_age_raw)
         carried_weight = _to_float(_safe_text(cells, idx_carried_weight))
         jockey = _safe_text(cells, idx_jockey)
+        trainer = _safe_text(cells, idx_trainer)
         body_weight, body_weight_diff = _parse_body_weight(_safe_text(cells, idx_body_weight))
         popularity = _to_int(_safe_text(cells, idx_popularity))
         odds = _to_float(_safe_text(cells, idx_odds))
@@ -177,6 +179,7 @@ def parse_entry(html: str, race_id: str) -> List[Dict]:
             "age": age,
             "carried_weight": carried_weight,
             "jockey": jockey,
+            "trainer": trainer,
             "body_weight": body_weight,
             "body_weight_diff": body_weight_diff,
             "odds": odds,
@@ -204,6 +207,7 @@ def parse_result(html: str, race_id: str) -> List[Dict]:
     idx_sex_age = _find_col(header_map, ["性齢"])
     idx_carried_weight = _find_col(header_map, ["斤量"])
     idx_jockey = _find_col(header_map, ["騎手"])
+    idx_trainer = _find_col(header_map, ["調教師", "厩舎"])
     idx_finish_time = _find_col(header_map, ["タイム"])
     idx_popularity = _find_col(header_map, ["人気"])
     idx_odds = _find_col(header_map, ["単勝オッズ", "オッズ"])
@@ -227,6 +231,7 @@ def parse_result(html: str, race_id: str) -> List[Dict]:
         sex, age = _split_sex_age(sex_age_raw)
         carried_weight = _to_float(_safe_text(cells, idx_carried_weight))
         jockey = _safe_text(cells, idx_jockey)
+        trainer = _safe_text(cells, idx_trainer)
         finish_time = _safe_text(cells, idx_finish_time)
         popularity = _to_int(_safe_text(cells, idx_popularity))
         odds = _to_float(_safe_text(cells, idx_odds))
@@ -242,6 +247,7 @@ def parse_result(html: str, race_id: str) -> List[Dict]:
             "age": age,
             "carried_weight": carried_weight,
             "jockey": jockey,
+            "trainer": trainer,
             "body_weight": body_weight,
             "body_weight_diff": body_weight_diff,
             "odds": odds,

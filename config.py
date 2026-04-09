@@ -1,4 +1,4 @@
-﻿APP_TITLE = "競馬予想ツール"
+APP_TITLE = "競馬予想ツール"
 
 DATA_DIR = "data"
 MODEL_DIR = "models"
@@ -14,3 +14,4 @@ REQUEST_RETRY = 3
 SLEEP_BETWEEN_RETRY = 1.5
 
 HEADLESS = True
+ENABLE_HTML_CACHE = False
