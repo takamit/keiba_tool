@@ -1,9 +1,41 @@
-﻿venv/
+﻿# Python cache
 __pycache__/
-*.pyc
-cache/
-logs/
-models/
-data/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Logs
+logs/*.log
+logs/*.txt
+
+# Runtime data you usually should not version
+cache/
+data/
+models/
+
+# Local env files
+.env
+.env.*
