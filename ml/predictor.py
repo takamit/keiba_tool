@@ -94,7 +94,7 @@ def _score_quality(metrics: Dict) -> float:
     return max(0.1, f1 * 0.60 + auc * 0.25 + recall * 0.15)
 
 
-def predict_from_entry(entry_csv_path: str, model_dir: str = "models", output_path=None):
+def predict_from_entry(entry_csv_path: str, model_dir: str = "models", output_path=None, strategy: str = "balanced", **kwargs):
     if not os.path.exists(entry_csv_path):
         raise FileNotFoundError(f"出走表CSVが見つかりません: {entry_csv_path}")
 
@@ -177,3 +177,67 @@ def predict_from_entry(entry_csv_path: str, model_dir: str = "models", output_pa
         result_df.to_csv(output_path, index=False, encoding="utf-8-sig")
 
     return result_df
+
+def build_bet_recommendations(result_df: pd.DataFrame, bet_types=None) -> List[Dict]:
+    bet_types = bet_types or ["単勝"]
+    if result_df is None or result_df.empty:
+        return []
+    recommendations: List[Dict] = []
+    for race_id, race_df in result_df.groupby("race_id"):
+        sorted_df = race_df.sort_values(by=["pred_rank", "horse_no"], ascending=[True, True]).reset_index(drop=True)
+        top = sorted_df.head(3)
+        if top.empty:
+            continue
+        race_no = ""
+        track = ""
+        if "race_id" in top.columns:
+            race_no = str(race_id)[-2:]
+        if "track" in top.columns:
+            track = str(top.iloc[0].get("track", ""))
+        for bet_type in bet_types:
+            if bet_type == "単勝":
+                row = top.iloc[0]
+                recommendations.append({
+                    "race_id": race_id,
+                    "track": track,
+                    "race_no": race_no,
+                    "bet_type": bet_type,
+                    "bet_text": f"{int(row.get('horse_no', 0)) if pd.notna(row.get('horse_no', 0)) else row.get('horse_name', '')}",
+                    "confidence": float(row.get("score", 0.0)),
+                })
+            elif bet_type == "複勝":
+                row = top.iloc[0]
+                recommendations.append({
+                    "race_id": race_id,
+                    "track": track,
+                    "race_no": race_no,
+                    "bet_type": bet_type,
+                    "bet_text": f"{int(row.get('horse_no', 0)) if pd.notna(row.get('horse_no', 0)) else row.get('horse_name', '')}",
+                    "confidence": float(row.get("score", 0.0)),
+                })
+            elif bet_type in {"ワイド", "馬連"} and len(top) >= 2:
+                a = top.iloc[0]
+                b = top.iloc[1]
+                recommendations.append({
+                    "race_id": race_id,
+                    "track": track,
+                    "race_no": race_no,
+                    "bet_type": bet_type,
+                    "bet_text": f"{int(a.get('horse_no', 0)) if pd.notna(a.get('horse_no', 0)) else a.get('horse_name', '')}-{int(b.get('horse_no', 0)) if pd.notna(b.get('horse_no', 0)) else b.get('horse_name', '')}",
+                    "confidence": float((a.get("score", 0.0) + b.get("score", 0.0)) / 2.0),
+                })
+            elif bet_type in {"3連複", "三連複"} and len(top) >= 3:
+                nums = []
+                conf = 0.0
+                for _, row in top.head(3).iterrows():
+                    nums.append(str(int(row.get("horse_no", 0))) if pd.notna(row.get("horse_no", 0)) else str(row.get("horse_name", "")))
+                    conf += float(row.get("score", 0.0))
+                recommendations.append({
+                    "race_id": race_id,
+                    "track": track,
+                    "race_no": race_no,
+                    "bet_type": bet_type,
+                    "bet_text": "-".join(nums),
+                    "confidence": conf / 3.0,
+                })
+    return recommendations

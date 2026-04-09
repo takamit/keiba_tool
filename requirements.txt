@@ -1,10 +1,9 @@
-﻿requests
 beautifulsoup4
-lxml
-pandas
-numpy
-scikit-learn
 joblib
+lxml
+numpy
+pandas
+requests
+scikit-learn
 selenium
 webdriver-manager
-tkcalendar

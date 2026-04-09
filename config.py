@@ -1,17 +1,34 @@
-APP_TITLE = "競馬予想ツール"
+from config.app_config import APP_TITLE, DEFAULT_MODE
+from config.paths import (
+    DATA_DIR,
+    MODEL_DIR,
+    CACHE_DIR,
+    LOG_DIR,
+    ENTRY_FILE_PATTERN,
+    RESULT_FILE_PATTERN,
+    PREDICT_FILE_PATTERN,
+)
+from config.settings import (
+    REQUEST_TIMEOUT,
+    REQUEST_RETRY,
+    SLEEP_BETWEEN_RETRY,
+    HEADLESS,
+    ENABLE_HTML_CACHE,
+)
 
-DATA_DIR = "data"
-MODEL_DIR = "models"
-CACHE_DIR = "cache"
-LOG_DIR = "logs"
-
-ENTRY_FILE_PATTERN = "entry_{date}.csv"
-RESULT_FILE_PATTERN = "result_{date}.csv"
-PREDICT_FILE_PATTERN = "predict_{date}.csv"
-
-REQUEST_TIMEOUT = 20
-REQUEST_RETRY = 3
-SLEEP_BETWEEN_RETRY = 1.5
-
-HEADLESS = True
-ENABLE_HTML_CACHE = False
+__all__ = [
+    "APP_TITLE",
+    "DEFAULT_MODE",
+    "DATA_DIR",
+    "MODEL_DIR",
+    "CACHE_DIR",
+    "LOG_DIR",
+    "ENTRY_FILE_PATTERN",
+    "RESULT_FILE_PATTERN",
+    "PREDICT_FILE_PATTERN",
+    "REQUEST_TIMEOUT",
+    "REQUEST_RETRY",
+    "SLEEP_BETWEEN_RETRY",
+    "HEADLESS",
+    "ENABLE_HTML_CACHE",
+]
