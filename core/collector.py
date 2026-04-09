@@ -9,8 +9,8 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 from config import (
@@ -69,15 +69,48 @@ def _cache_path(name: str) -> str:
 def _write_cache(name: str, html: str) -> None:
     if not _HTML_CACHE_ENABLED:
         return
-    cache_path = _cache_path(name)
-    with open(cache_path, "w", encoding="utf-8") as f:
+    with open(_cache_path(name), "w", encoding="utf-8") as f:
         f.write(html)
 
 
 def _read_cache(name: str) -> str:
-    cache_path = _cache_path(name)
-    with open(cache_path, "r", encoding="utf-8") as f:
+    with open(_cache_path(name), "r", encoding="utf-8") as f:
         return f.read()
+
+
+def get_html_cache_summary() -> Tuple[int, int]:
+    _ensure_dir(CACHE_DIR)
+    count = 0
+    total_size = 0
+
+    for name in os.listdir(CACHE_DIR):
+        if not name.lower().endswith(".html"):
+            continue
+        path = os.path.join(CACHE_DIR, name)
+        if os.path.isfile(path):
+            count += 1
+            total_size += os.path.getsize(path)
+
+    return count, total_size
+
+
+def clear_html_cache() -> int:
+    _ensure_dir(CACHE_DIR)
+    removed = 0
+
+    for name in os.listdir(CACHE_DIR):
+        if not name.lower().endswith(".html"):
+            continue
+        path = os.path.join(CACHE_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError:
+            pass
+
+    return removed
 
 
 def _normalize_date(date: str) -> str:
@@ -86,7 +119,9 @@ def _normalize_date(date: str) -> str:
       - YYYYMMDD
       - YYYY-MM-DD
       - YYYY/MM/DD
-    戻り値は YYYYMMDD
+
+    戻り値:
+      - YYYYMMDD
     """
     if date is None:
         raise ValueError("日付が未入力です")
@@ -155,36 +190,6 @@ def _build_driver():
     return driver
 
 
-def get_html_cache_summary() -> Tuple[int, int]:
-    _ensure_dir(CACHE_DIR)
-    total_size = 0
-    files = []
-    for name in os.listdir(CACHE_DIR):
-        if not name.lower().endswith(".html"):
-            continue
-        path = os.path.join(CACHE_DIR, name)
-        if os.path.isfile(path):
-            files.append(path)
-            total_size += os.path.getsize(path)
-    return len(files), total_size
-
-
-def clear_html_cache() -> int:
-    _ensure_dir(CACHE_DIR)
-    removed = 0
-    for name in os.listdir(CACHE_DIR):
-        if not name.lower().endswith(".html"):
-            continue
-        path = os.path.join(CACHE_DIR, name)
-        if os.path.isfile(path):
-            try:
-                os.remove(path)
-                removed += 1
-            except OSError:
-                pass
-    return removed
-
-
 def _extract_race_ids_from_html(html: str) -> List[str]:
     patterns = [
         r"race_id=(\d{12})",
@@ -205,9 +210,9 @@ def _extract_race_ids_from_dom(driver) -> List[str]:
     found = set()
 
     try:
-        elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='race_id=']")
-        for elem in elements:
-            href = elem.get_attribute("href") or ""
+        links = driver.find_elements(By.CSS_SELECTOR, "a[href*='race_id=']")
+        for link in links:
+            href = link.get_attribute("href") or ""
             found.update(re.findall(r"race_id=(\d{12})", href))
     except Exception:
         pass
@@ -215,11 +220,9 @@ def _extract_race_ids_from_dom(driver) -> List[str]:
     return sorted(found)
 
 
-def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> Tuple[List[str], str]:
-    driver.get(url)
-
+def _wait_for_page(driver) -> None:
     try:
-        WebDriverWait(driver, 8).until(
+        WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
         )
     except TimeoutException:
@@ -228,14 +231,19 @@ def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> Tuple[List[
     time.sleep(2.0)
 
     try:
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.3);")
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.35);")
         time.sleep(0.7)
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.6);")
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.7);")
         time.sleep(0.7)
         driver.execute_script("window.scrollTo(0, 0);")
         time.sleep(0.5)
     except Exception:
         pass
+
+
+def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> Tuple[List[str], str]:
+    driver.get(url)
+    _wait_for_page(driver)
 
     html = driver.page_source or ""
     _write_cache(cache_name, html)
@@ -247,17 +255,36 @@ def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> Tuple[List[
     return sorted(race_ids), html
 
 
+def _summarize_failure_html(html: str) -> str:
+    if not html:
+        return "HTML未取得"
+
+    lowered = html.lower()
+
+    if "アクセスが集中" in html:
+        return "アクセス集中"
+    if "メンテナンス" in html:
+        return "メンテナンス表示"
+    if "お探しのページは見つかりません" in html or "404" in lowered:
+        return "404相当"
+    if "netkeiba" not in lowered:
+        return "想定外HTML"
+
+    return "race_id未検出"
+
+
 def get_race_ids(date: str) -> List[str]:
     normalized_date = _normalize_date(date)
     driver = _build_driver()
 
     try:
         all_race_ids = set()
-        primary_html = ""
+        failure_notes = []
 
         primary_url = (
             f"https://race.netkeiba.com/top/race_list.html?kaisai_date={normalized_date}"
         )
+
         try:
             ids, primary_html = _load_page_and_collect_ids(
                 driver,
@@ -265,8 +292,10 @@ def get_race_ids(date: str) -> List[str]:
                 f"race_list_{normalized_date}",
             )
             all_race_ids.update(ids)
-        except WebDriverException:
-            pass
+            if not ids:
+                failure_notes.append(f"race_list={_summarize_failure_html(primary_html)}")
+        except WebDriverException as exc:
+            failure_notes.append(f"race_list=webdriver_error:{exc.__class__.__name__}")
 
         if not all_race_ids:
             for place_code in KAISAI_PLACE_CODES:
@@ -275,34 +304,33 @@ def get_race_ids(date: str) -> List[str]:
                     f"?kaisai_date={normalized_date}&kaisai_place={place_code}"
                 )
                 try:
-                    ids, _ = _load_page_and_collect_ids(
+                    ids, sub_html = _load_page_and_collect_ids(
                         driver,
                         sub_url,
                         f"race_list_{normalized_date}_{place_code}",
                     )
                     all_race_ids.update(ids)
-                except WebDriverException:
-                    continue
-
-        race_ids = sorted(all_race_ids)
-
-        if not race_ids:
-            if primary_html:
-                lower_html = primary_html.lower()
-                if "地方" in primary_html or "nar" in lower_html:
-                    raise RuntimeError(
-                        "指定日は地方競馬開催日の可能性があります。"
-                        "現在のレースID取得はJRA開催前提です。"
-                        "JRA開催日（土日中心）を指定してください。"
+                    if ids:
+                        continue
+                    failure_notes.append(
+                        f"sub_{place_code}={_summarize_failure_html(sub_html)}"
+                    )
+                except WebDriverException as exc:
+                    failure_notes.append(
+                        f"sub_{place_code}=webdriver_error:{exc.__class__.__name__}"
                     )
 
-            raise RuntimeError(
-                "レースIDを取得できませんでした。"
-                "JRA非開催日の可能性があります。"
-                "まずは土日の開催日を指定してください。"
-            )
+        race_ids = sorted(all_race_ids)
+        if race_ids:
+            return race_ids
 
-        return race_ids
+        detail = " / ".join(failure_notes[:4]) if failure_notes else "詳細不明"
+        raise RuntimeError(
+            "レースIDを取得できませんでした。"
+            f"日付={normalized_date}、診断={detail}。"
+            "開催が存在しない日付、netkeiba側の表示変更、"
+            "またはアクセス制限の可能性があります。"
+        )
 
     finally:
         driver.quit()
@@ -334,8 +362,8 @@ def fetch_race_page(race_id: str, mode: str = "entry", use_cache: bool = True) -
             html = res.text
             _write_cache(cache_name, html)
             return html
-        except Exception as e:
-            last_error = e
+        except Exception as exc:
+            last_error = exc
             time.sleep(SLEEP_BETWEEN_RETRY)
 
     raise RuntimeError(
