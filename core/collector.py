@@ -9,8 +9,8 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
 from config import (
@@ -26,20 +26,25 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/135.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
-    ),
-    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Connection": "keep-alive",
+        "Chrome/123.0.0.0 Safari/537.36"
+    )
 }
 
 _HTML_CACHE_ENABLED = bool(ENABLE_HTML_CACHE)
-_SESSION: requests.Session | None = None
+
+# JRAの主な開催場コード
+KAISAI_PLACE_CODES = [
+    "01",  # 札幌
+    "02",  # 函館
+    "03",  # 福島
+    "04",  # 新潟
+    "05",  # 東京
+    "06",  # 中山
+    "07",  # 中京
+    "08",  # 京都
+    "09",  # 阪神
+    "10",  # 小倉
+]
 
 
 def set_html_cache_enabled(enabled: bool) -> None:
@@ -75,15 +80,6 @@ def _read_cache(name: str) -> str:
         return f.read()
 
 
-def _get_session() -> requests.Session:
-    global _SESSION
-    if _SESSION is None:
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        _SESSION = session
-    return _SESSION
-
-
 def _build_driver():
     options = Options()
     if HEADLESS:
@@ -94,17 +90,29 @@ def _build_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--start-maximized")
+    options.add_argument(
+        "--user-agent="
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    )
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
-    except Exception:
-        driver = webdriver.Chrome(options=options)
-
-    try:
-        driver.set_page_load_timeout(max(REQUEST_TIMEOUT, 30))
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": """
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                """
+            },
+        )
     except Exception:
         pass
 
@@ -141,161 +149,120 @@ def clear_html_cache() -> int:
     return removed
 
 
-def _extract_race_ids(html: str) -> List[str]:
-    ids = sorted(set(re.findall(r"race_id=(\d{12})", html)))
-    return ids
-
-
-def _looks_blocked_or_invalid(html: str, mode: str) -> bool:
-    if not html or len(html.strip()) < 200:
-        return True
-
-    blocked_markers = [
-        "アクセスが集中",
-        "しばらく時間をおいて",
-        "forbidden",
-        "access denied",
-        "too many requests",
-        "error 403",
-        "error 429",
+def _extract_race_ids_from_html(html: str) -> List[str]:
+    patterns = [
+        r"race_id=(\d{12})",
+        r"/race/shutuba\.html\?race_id=(\d{12})",
+        r"/race/result\.html\?race_id=(\d{12})",
+        r'"race_id":"(\d{12})"',
+        r"'race_id':'(\d{12})'",
     ]
-    lower_html = html.lower()
-    if any(marker in html for marker in blocked_markers[:2]):
-        return True
-    if any(marker in lower_html for marker in blocked_markers[2:]):
-        return True
 
-    if mode == "entry":
-        valid_markers = [
-            "RaceTable01",
-            "race_table_01",
-            "Shutuba_Table",
-            "出馬表",
-            "出走表",
-            "馬名",
-        ]
-    else:
-        valid_markers = [
-            "RaceTable01",
-            "race_table_01",
-            "着順",
-            "払戻",
-            "結果",
-            "タイム",
-        ]
+    found = set()
+    for pattern in patterns:
+        found.update(re.findall(pattern, html))
 
-    return not any(marker in html for marker in valid_markers)
+    return sorted(found)
 
 
-def _request_html(url: str, referer: str | None = None) -> str:
-    session = _get_session()
-    headers = dict(HEADERS)
-    if referer:
-        headers["Referer"] = referer
+def _extract_race_ids_from_dom(driver) -> List[str]:
+    found = set()
 
-    response = session.get(
-        url,
-        headers=headers,
-        timeout=REQUEST_TIMEOUT,
-        allow_redirects=True,
-    )
-    response.raise_for_status()
-    response.encoding = response.apparent_encoding or "utf-8"
-    return response.text
-
-
-def _fetch_with_requests(url: str, mode: str) -> str:
-    last_error: Exception | None = None
-
-    for attempt in range(REQUEST_RETRY):
-        try:
-            html = _request_html(
-                url=url,
-                referer="https://race.netkeiba.com/",
-            )
-            if _looks_blocked_or_invalid(html, mode):
-                raise RuntimeError("requests取得結果がブロックまたは不完全HTMLでした")
-            return html
-        except Exception as exc:
-            last_error = exc
-            sleep_sec = SLEEP_BETWEEN_RETRY * (attempt + 1)
-            time.sleep(sleep_sec)
-
-    raise RuntimeError(f"requests取得失敗: {last_error}")
-
-
-def _wait_for_race_list(driver, timeout: int = 15) -> str:
-    end_time = time.time() + timeout
-    last_html = ""
-
-    while time.time() < end_time:
-        html = driver.page_source or ""
-        last_html = html
-        if _extract_race_ids(html):
-            return html
-        time.sleep(0.5)
-
-    return last_html
-
-
-def _fetch_with_selenium(url: str, mode: str, wait_sec: int = 20) -> str:
-    driver = _build_driver()
     try:
-        driver.get(url)
+        elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='race_id=']")
+        for elem in elements:
+            href = elem.get_attribute("href") or ""
+            found.update(re.findall(r"race_id=(\d{12})", href))
+    except Exception:
+        pass
 
-        if "race_list.html" in url:
-            html = _wait_for_race_list(driver, timeout=wait_sec)
-            if _extract_race_ids(html):
-                return html
-            raise RuntimeError("Seleniumでrace_idを取得できませんでした")
+    return sorted(found)
 
-        try:
-            WebDriverWait(driver, wait_sec).until(
-                lambda d: not _looks_blocked_or_invalid(d.page_source or "", mode)
-            )
-        except TimeoutException:
-            pass
 
-        html = driver.page_source or ""
-        if _looks_blocked_or_invalid(html, mode):
-            raise RuntimeError("Selenium取得結果がブロックまたは不完全HTMLでした")
-        return html
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> List[str]:
+    driver.get(url)
+
+    try:
+        WebDriverWait(driver, 8).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+    except TimeoutException:
+        pass
+
+    time.sleep(2.0)
+
+    # 軽くスクロールして遅延描画にも対応
+    try:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.3);")
+        time.sleep(0.7)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.6);")
+        time.sleep(0.7)
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    html = driver.page_source or ""
+    _write_cache(cache_name, html)
+
+    race_ids = set(_extract_race_ids_from_html(html))
+    if not race_ids:
+        race_ids.update(_extract_race_ids_from_dom(driver))
+
+    return sorted(race_ids)
 
 
 def get_race_ids(date: str) -> List[str]:
     if not re.fullmatch(r"\d{8}", date):
         raise ValueError("日付は YYYYMMDD 8桁で入力してください")
 
-    url = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date}"
-    cache_name = f"race_list_{date}"
-    cache_path = _cache_path(cache_name)
+    driver = _build_driver()
 
-    if _HTML_CACHE_ENABLED and os.path.exists(cache_path):
-        html = _read_cache(cache_name)
-        race_ids = _extract_race_ids(html)
-        if race_ids:
-            return race_ids
+    try:
+        all_race_ids = set()
 
-    last_error: Exception | None = None
-
-    for attempt in range(REQUEST_RETRY):
+        # 1) 従来ページをまず試す
+        primary_url = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date}"
         try:
-            html = _fetch_with_selenium(url, mode="entry", wait_sec=15 + attempt * 5)
-            race_ids = _extract_race_ids(html)
-            if not race_ids:
-                raise RuntimeError("開催ページからrace_idを抽出できませんでした")
-            _write_cache(cache_name, html)
-            return race_ids
-        except Exception as exc:
-            last_error = exc
-            time.sleep(SLEEP_BETWEEN_RETRY * (attempt + 1))
+            ids = _load_page_and_collect_ids(
+                driver,
+                primary_url,
+                f"race_list_{date}",
+            )
+            all_race_ids.update(ids)
+        except WebDriverException:
+            pass
 
-    raise RuntimeError(f"race_id取得失敗: date={date}, error={last_error}")
+        # 2) 従来ページで取れない場合、place別サブページを総当たり
+        if not all_race_ids:
+            for place_code in KAISAI_PLACE_CODES:
+                sub_url = (
+                    "https://race.netkeiba.com/top/race_list_sub.html"
+                    f"?kaisai_date={date}&kaisai_place={place_code}"
+                )
+                try:
+                    ids = _load_page_and_collect_ids(
+                        driver,
+                        sub_url,
+                        f"race_list_{date}_{place_code}",
+                    )
+                    all_race_ids.update(ids)
+                except WebDriverException:
+                    continue
+
+        race_ids = sorted(all_race_ids)
+
+        if not race_ids:
+            raise RuntimeError(
+                "レースIDを取得できませんでした。"
+                "開催が存在しない日付、netkeiba側の表示変更、"
+                "またはアクセス制限の可能性があります。"
+            )
+
+        return race_ids
+
+    finally:
+        driver.quit()
 
 
 def fetch_race_page(race_id: str, mode: str = "entry", use_cache: bool = True) -> str:
@@ -313,28 +280,21 @@ def fetch_race_page(race_id: str, mode: str = "entry", use_cache: bool = True) -
     cache_path = _cache_path(cache_name)
 
     if _HTML_CACHE_ENABLED and use_cache and os.path.exists(cache_path):
-        html = _read_cache(cache_name)
-        if not _looks_blocked_or_invalid(html, mode):
+        return _read_cache(cache_name)
+
+    last_error = None
+    for _ in range(REQUEST_RETRY):
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            res.raise_for_status()
+            res.encoding = res.apparent_encoding or "utf-8"
+            html = res.text
+            _write_cache(cache_name, html)
             return html
-
-    request_error: Exception | None = None
-    try:
-        html = _fetch_with_requests(url, mode)
-        _write_cache(cache_name, html)
-        return html
-    except Exception as exc:
-        request_error = exc
-
-    selenium_error: Exception | None = None
-    try:
-        html = _fetch_with_selenium(url, mode=mode, wait_sec=20)
-        _write_cache(cache_name, html)
-        return html
-    except Exception as exc:
-        selenium_error = exc
+        except Exception as e:
+            last_error = e
+            time.sleep(SLEEP_BETWEEN_RETRY)
 
     raise RuntimeError(
-        "レースページ取得失敗: "
-        f"race_id={race_id}, mode={mode}, "
-        f"requests_error={request_error}, selenium_error={selenium_error}"
+        f"レースページ取得失敗: race_id={race_id}, mode={mode}, error={last_error}"
     )
