@@ -32,7 +32,7 @@ HEADERS = {
 
 _HTML_CACHE_ENABLED = bool(ENABLE_HTML_CACHE)
 
-# JRAの主な開催場コード
+# JRA主な開催場コード
 KAISAI_PLACE_CODES = [
     "01",  # 札幌
     "02",  # 函館
@@ -78,6 +78,43 @@ def _read_cache(name: str) -> str:
     cache_path = _cache_path(name)
     with open(cache_path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def _normalize_date(date: str) -> str:
+    """
+    許可形式:
+      - YYYYMMDD
+      - YYYY-MM-DD
+      - YYYY/MM/DD
+    戻り値は YYYYMMDD
+    """
+    if date is None:
+        raise ValueError("日付が未入力です")
+
+    value = str(date).strip()
+    if not value:
+        raise ValueError("日付が未入力です")
+
+    # 2026-04-09 / 2026/04/09 -> 20260409
+    normalized = value.replace("-", "").replace("/", "").strip()
+
+    if not re.fullmatch(r"\d{8}", normalized):
+        raise ValueError(
+            "日付形式が不正です。YYYYMMDD / YYYY-MM-DD / YYYY/MM/DD のいずれかで入力してください"
+        )
+
+    yyyy = int(normalized[0:4])
+    mm = int(normalized[4:6])
+    dd = int(normalized[6:8])
+
+    if yyyy < 1900 or yyyy > 2100:
+        raise ValueError("年の値が不正です")
+    if mm < 1 or mm > 12:
+        raise ValueError("月の値が不正です")
+    if dd < 1 or dd > 31:
+        raise ValueError("日の値が不正です")
+
+    return normalized
 
 
 def _build_driver():
@@ -191,7 +228,6 @@ def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> List[str]:
 
     time.sleep(2.0)
 
-    # 軽くスクロールして遅延描画にも対応
     try:
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.3);")
         time.sleep(0.7)
@@ -213,38 +249,38 @@ def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> List[str]:
 
 
 def get_race_ids(date: str) -> List[str]:
-    if not re.fullmatch(r"\d{8}", date):
-        raise ValueError("日付は YYYYMMDD 8桁で入力してください")
-
+    normalized_date = _normalize_date(date)
     driver = _build_driver()
 
     try:
         all_race_ids = set()
 
-        # 1) 従来ページをまず試す
-        primary_url = f"https://race.netkeiba.com/top/race_list.html?kaisai_date={date}"
+        # 1) 従来ページ
+        primary_url = (
+            f"https://race.netkeiba.com/top/race_list.html?kaisai_date={normalized_date}"
+        )
         try:
             ids = _load_page_and_collect_ids(
                 driver,
                 primary_url,
-                f"race_list_{date}",
+                f"race_list_{normalized_date}",
             )
             all_race_ids.update(ids)
         except WebDriverException:
             pass
 
-        # 2) 従来ページで取れない場合、place別サブページを総当たり
+        # 2) 開催場別サブページ
         if not all_race_ids:
             for place_code in KAISAI_PLACE_CODES:
                 sub_url = (
                     "https://race.netkeiba.com/top/race_list_sub.html"
-                    f"?kaisai_date={date}&kaisai_place={place_code}"
+                    f"?kaisai_date={normalized_date}&kaisai_place={place_code}"
                 )
                 try:
                     ids = _load_page_and_collect_ids(
                         driver,
                         sub_url,
-                        f"race_list_{date}_{place_code}",
+                        f"race_list_{normalized_date}_{place_code}",
                     )
                     all_race_ids.update(ids)
                 except WebDriverException:
