@@ -26,6 +26,7 @@ from config import (
     RESULT_FILE_PATTERN,
 )
 from core import collector, dataset, parser
+from core.services.batch_collect_service import resolve_holding_dates
 from ml import predictor, trainer
 
 
@@ -1564,9 +1565,10 @@ class AppGUI(tk.Tk):
         self._reset_progress_direct(operation_name)
         return True
 
-    def _finish_operation(self, operation_name):
+    def _finish_operation(self, operation_name, reset_progress=False):
         self._set_button_state_direct(operation_name, False)
-        self._reset_progress_direct(operation_name)
+        if reset_progress:
+            self._reset_progress_direct(operation_name)
         self.current_operation = None
         self.pause_event.clear()
         self.stop_event.clear()
@@ -1578,23 +1580,41 @@ class AppGUI(tk.Tk):
         if self.pause_event.is_set():
             self.pause_event.clear()
             self._set_pause_button_text_direct(self.current_operation, "一時停止")
+            self._queue_ui(
+                self._append_log_direct,
+                self.operation_logs[self.current_operation],
+                "[INFO] 処理を再開します。",
+            )
         else:
             self.pause_event.set()
             self._set_pause_button_text_direct(self.current_operation, "再開")
+            self._queue_ui(
+                self._append_log_direct,
+                self.operation_logs[self.current_operation],
+                "[INFO] 一時停止を要求しました。現在の処理区切りで停止します。",
+            )
 
     def _stop_current_operation(self):
         if self.current_operation is not None:
             self.stop_event.set()
+            self._queue_ui(
+                self._append_log_direct,
+                self.operation_logs[self.current_operation],
+                "[STOP] 停止を要求しました。現在の処理区切りで停止します。",
+            )
 
-    def _checkpoint(self, operation_name, current, total, message, started_at):
-        if self.stop_event.is_set():
-            raise OperationCancelled("ユーザーが停止しました。")
-
+    def _wait_if_paused(self, operation_name, current, total, started_at):
         while self.pause_event.is_set():
             self._queue_ui(self._update_progress_direct, operation_name, current, total, "一時停止中", "--:--")
             time.sleep(0.2)
             if self.stop_event.is_set():
                 raise OperationCancelled("ユーザーが停止しました。")
+
+    def _checkpoint(self, operation_name, current, total, message, started_at):
+        if self.stop_event.is_set():
+            raise OperationCancelled("ユーザーが停止しました。")
+
+        self._wait_if_paused(operation_name, current, total, started_at)
 
         eta_text = "--:--"
         if current > 0 and total > current:
@@ -1697,23 +1717,39 @@ class AppGUI(tk.Tk):
 
     # ---------- workers ----------
     def _filter_holding_dates(self, operation_name, date_list, started_at):
-        valid_dates = []
         total = max(len(date_list), 1)
 
-        for idx, date_obj in enumerate(date_list, start=1):
-            date_str = self._compact_date(date_obj)
-            self._checkpoint(operation_name, idx - 1, total, f"開催日判定中 {date_str}", started_at)
-            race_ids = collector.get_race_ids(date_str)
+        def progress_callback(current_value, total_count, message):
+            self._checkpoint(operation_name, current_value, total_count, message, started_at)
 
-            if race_ids:
-                valid_dates.append((date_obj, race_ids))
-                self._queue_ui(self._append_log_direct, self.operation_logs[operation_name], f"[開催判定] {date_str}: 開催あり / race_id数={len(race_ids)}")
-            else:
-                self._queue_ui(self._append_log_direct, self.operation_logs[operation_name], f"[開催判定] {date_str}: 非開催")
+        def log_callback(message):
+            self._queue_ui(self._append_log_direct, self.operation_logs[operation_name], message)
 
-            self._checkpoint(operation_name, idx, total, f"開催日判定中 {date_str}", started_at)
+        def wait_if_paused():
+            self._wait_if_paused(operation_name, 0, total, started_at)
 
-        return valid_dates
+        def check_cancel():
+            if self.stop_event.is_set():
+                raise OperationCancelled("ユーザーが停止しました。")
+
+        valid_batches, skipped_dates = resolve_holding_dates(
+            date_list,
+            date_to_str=self._compact_date,
+            progress_callback=progress_callback,
+            log_callback=log_callback,
+            wait_if_paused=wait_if_paused,
+            check_cancel=check_cancel,
+        )
+
+        if skipped_dates:
+            self._queue_ui(
+                self._append_log_direct,
+                self.operation_logs[operation_name],
+                f"[INFO] 非開催日をスキップ: {', '.join(skipped_dates)}",
+            )
+
+        self._checkpoint(operation_name, total, total, "開催日判定完了", started_at)
+        return [(batch.date_obj, batch.race_ids) for batch in valid_batches]
 
     def run_collect(self, dates):
         started_at = time.time()
@@ -1728,6 +1764,17 @@ class AppGUI(tk.Tk):
             total_steps = sum(len(race_ids) * 2 + 2 for _, race_ids in valid_dates)
             current = 0
 
+            def status_callback(message, current_value=None):
+                current_step = current if current_value is None else current_value
+                self._checkpoint("collect", current_step, total_steps, message, started_at)
+
+            def wait_if_paused():
+                self._wait_if_paused("collect", current, total_steps, started_at)
+
+            def check_cancel():
+                if self.stop_event.is_set():
+                    raise OperationCancelled("ユーザーが停止しました。")
+
             for date_obj, race_ids in valid_dates:
                 date_str = self._compact_date(date_obj)
                 self._queue_ui(self._append_log_direct, self.collect_log, f"=== {date_str} 開始 ===")
@@ -1736,18 +1783,34 @@ class AppGUI(tk.Tk):
                 result_rows = []
 
                 for race_id in race_ids:
-                    self._checkpoint("collect", current, total_steps, f"出走表取得中 {race_id}", started_at)
-                    entry_html = collector.fetch_race_page(race_id, mode="entry", use_cache=True)
+                    status_callback(f"出走表取得中 {race_id}")
+                    entry_html = collector.fetch_race_page(
+                        race_id,
+                        mode="entry",
+                        use_cache=True,
+                        status_callback=status_callback,
+                        wait_if_paused=wait_if_paused,
+                        check_cancel=check_cancel,
+                    )
                     entry_rows.extend(parser.parse_entry(entry_html, race_id))
                     current += 1
+                    status_callback(f"出走表取得完了 {race_id}", current)
 
-                    self._checkpoint("collect", current, total_steps, f"結果取得中 {race_id}", started_at)
+                    status_callback(f"結果取得中 {race_id}")
                     try:
-                        result_html = collector.fetch_race_page(race_id, mode="result", use_cache=True)
+                        result_html = collector.fetch_race_page(
+                            race_id,
+                            mode="result",
+                            use_cache=True,
+                            status_callback=status_callback,
+                            wait_if_paused=wait_if_paused,
+                            check_cancel=check_cancel,
+                        )
                         result_rows.extend(parser.parse_result(result_html, race_id))
                     except Exception as exc:
                         self._queue_ui(self._append_log_direct, self.collect_log, f"[INFO] result未取得: race_id={race_id} / {exc}")
                     current += 1
+                    status_callback(f"結果取得完了 {race_id}", current)
 
                 if entry_rows:
                     entry_df = dataset.build_entry_df(entry_rows)
@@ -1757,7 +1820,7 @@ class AppGUI(tk.Tk):
                 else:
                     self._queue_ui(self._append_log_direct, self.collect_log, "出走表データなし")
                 current += 1
-                self._checkpoint("collect", current, total_steps, f"CSV保存中 {date_str}", started_at)
+                status_callback(f"出走表CSV保存完了 {date_str}", current)
 
                 if result_rows:
                     result_df = dataset.build_result_df(result_rows)
@@ -1767,19 +1830,23 @@ class AppGUI(tk.Tk):
                 else:
                     self._queue_ui(self._append_log_direct, self.collect_log, "結果データなし（未来日または未確定の可能性あり）")
                 current += 1
-                self._checkpoint("collect", current, total_steps, f"CSV保存中 {date_str}", started_at)
+                status_callback(f"結果CSV保存完了 {date_str}", current)
 
                 self._queue_ui(self._append_log_direct, self.collect_log, f"=== {date_str} 完了 ===")
                 self._queue_ui(self._append_log_direct, self.collect_log, "")
 
+            self._queue_ui(self._update_progress_direct, "collect", total_steps, total_steps, "データ取得完了", "00:00")
             self._queue_ui(messagebox.showinfo, "完了", "データ取得が完了しました。")
 
         except OperationCancelled as exc:
             self._queue_ui(self._append_log_direct, self.collect_log, f"[STOP] {exc}")
+            self._queue_ui(self._update_progress_direct, "collect", current if 'current' in locals() else 0, total_steps if 'total_steps' in locals() and total_steps > 0 else 1, "停止済み", "--:--")
         except Exception as exc:
             self._queue_ui(messagebox.showerror, "エラー", str(exc))
+            self._queue_ui(self._update_progress_direct, "collect", current if 'current' in locals() else 0, total_steps if 'total_steps' in locals() and total_steps > 0 else 1, f"エラー: {exc}", "--:--")
         finally:
             self._queue_ui(self._finish_operation, "collect")
+
 
     def run_train(self, data_dir, model_dir, families, is_auto=False):
         try:

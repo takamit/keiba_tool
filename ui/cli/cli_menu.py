@@ -1,10 +1,11 @@
 import argparse
 import os
 
-from config import DATA_DIR, ENTRY_FILE_PATTERN, PREDICT_FILE_PATTERN, RESULT_FILE_PATTERN, MODEL_DIR
-from core.collector import get_race_ids, fetch_race_page
-from core import parser, dataset
+from config import DATA_DIR, ENTRY_FILE_PATTERN, MODEL_DIR, PREDICT_FILE_PATTERN, RESULT_FILE_PATTERN
+from core import dataset, parser
+from core.collector import fetch_race_page, get_race_ids
 from ml import predictor, trainer
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser_obj = argparse.ArgumentParser(description="競馬ツール CLI")
@@ -25,23 +26,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser_obj
 
+
 def run_cli(args=None) -> int:
     parser_obj = build_parser()
     ns = parser_obj.parse_args(args=args)
 
     if ns.command == "collect":
         os.makedirs(DATA_DIR, exist_ok=True)
+
+        race_ids = get_race_ids(ns.date)
+        if not race_ids:
+            raise ValueError(
+                f"指定日 {ns.date} に開催レースが見つかりませんでした。"
+                "開催がない日付か、取得対象条件を見直してください。"
+            )
+
         rows = []
-        for race_id in get_race_ids(ns.date):
+        compact_date = ns.date.replace("-", "").replace("/", "")
+
+        for race_id in race_ids:
             html = fetch_race_page(race_id, mode=ns.mode, use_cache=True)
             if ns.mode == "entry":
                 rows.extend(parser.parse_entry(html, race_id))
-                df = dataset.build_entry_df(rows)
-                path = os.path.join(DATA_DIR, ENTRY_FILE_PATTERN.format(date=ns.date.replace("-", "").replace("/", "")))
             else:
                 rows.extend(parser.parse_result(html, race_id))
-                df = dataset.build_result_df(rows)
-                path = os.path.join(DATA_DIR, RESULT_FILE_PATTERN.format(date=ns.date.replace("-", "").replace("/", "")))
+
+        if ns.mode == "entry":
+            df = dataset.build_entry_df(rows)
+            path = os.path.join(DATA_DIR, ENTRY_FILE_PATTERN.format(date=compact_date))
+        else:
+            df = dataset.build_result_df(rows)
+            path = os.path.join(DATA_DIR, RESULT_FILE_PATTERN.format(date=compact_date))
+
         df.to_csv(path, index=False, encoding="utf-8-sig")
         print(path)
         return 0
@@ -52,8 +68,15 @@ def run_cli(args=None) -> int:
         return 0
 
     if ns.command == "predict":
-        output_path = ns.output_path or os.path.join(DATA_DIR, PREDICT_FILE_PATTERN.format(date="manual"))
-        df = predictor.predict_from_entry(ns.entry_csv, model_dir=ns.model_dir, output_path=output_path)
+        output_path = ns.output_path or os.path.join(
+            DATA_DIR,
+            PREDICT_FILE_PATTERN.format(date="manual"),
+        )
+        df = predictor.predict_from_entry(
+            ns.entry_csv,
+            model_dir=ns.model_dir,
+            output_path=output_path,
+        )
         print(output_path, len(df))
         return 0
 

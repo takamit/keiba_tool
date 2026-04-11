@@ -1,7 +1,7 @@
 import os
 import re
 import time
-from typing import List, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 import requests
 from selenium import webdriver
@@ -32,7 +32,6 @@ HEADERS = {
 
 _HTML_CACHE_ENABLED = bool(ENABLE_HTML_CACHE)
 
-# JRA主な開催場コード
 KAISAI_PLACE_CODES = [
     "01",  # 札幌
     "02",  # 函館
@@ -45,6 +44,18 @@ KAISAI_PLACE_CODES = [
     "09",  # 阪神
     "10",  # 小倉
 ]
+
+NO_RACE_KEYWORDS = [
+    "開催はありません",
+    "対象のレースはありません",
+    "レースはありません",
+    "該当するレースはありません",
+    "該当する開催はありません",
+]
+
+StatusCallback = Optional[Callable[[str], None]]
+WaitCallback = Optional[Callable[[], None]]
+CancelCallback = Optional[Callable[[], None]]
 
 
 def set_html_cache_enabled(enabled: bool) -> None:
@@ -69,20 +80,19 @@ def _cache_path(name: str) -> str:
 def _write_cache(name: str, html: str) -> None:
     if not _HTML_CACHE_ENABLED:
         return
-    with open(_cache_path(name), "w", encoding="utf-8") as f:
-        f.write(html)
+    with open(_cache_path(name), "w", encoding="utf-8") as file:
+        file.write(html)
 
 
 def _read_cache(name: str) -> str:
-    with open(_cache_path(name), "r", encoding="utf-8") as f:
-        return f.read()
+    with open(_cache_path(name), "r", encoding="utf-8") as file:
+        return file.read()
 
 
 def get_html_cache_summary() -> Tuple[int, int]:
     _ensure_dir(CACHE_DIR)
     count = 0
     total_size = 0
-
     for name in os.listdir(CACHE_DIR):
         if not name.lower().endswith(".html"):
             continue
@@ -90,14 +100,12 @@ def get_html_cache_summary() -> Tuple[int, int]:
         if os.path.isfile(path):
             count += 1
             total_size += os.path.getsize(path)
-
     return count, total_size
 
 
 def clear_html_cache() -> int:
     _ensure_dir(CACHE_DIR)
     removed = 0
-
     for name in os.listdir(CACHE_DIR):
         if not name.lower().endswith(".html"):
             continue
@@ -109,20 +117,10 @@ def clear_html_cache() -> int:
             removed += 1
         except OSError:
             pass
-
     return removed
 
 
 def _normalize_date(date: str) -> str:
-    """
-    許可形式:
-      - YYYYMMDD
-      - YYYY-MM-DD
-      - YYYY/MM/DD
-
-    戻り値:
-      - YYYYMMDD
-    """
     if date is None:
         raise ValueError("日付が未入力です")
 
@@ -131,7 +129,6 @@ def _normalize_date(date: str) -> str:
         raise ValueError("日付が未入力です")
 
     normalized = value.replace("-", "").replace("/", "").strip()
-
     if not re.fullmatch(r"\d{8}", normalized):
         raise ValueError(
             "日付形式が不正です。YYYYMMDD / YYYY-MM-DD / YYYY/MM/DD のいずれかで入力してください"
@@ -190,6 +187,31 @@ def _build_driver():
     return driver
 
 
+def _cooperate(wait_if_paused: WaitCallback = None, check_cancel: CancelCallback = None) -> None:
+    if check_cancel:
+        check_cancel()
+    if wait_if_paused:
+        wait_if_paused()
+    if check_cancel:
+        check_cancel()
+
+
+def _cooperative_sleep(
+    seconds: float,
+    *,
+    wait_if_paused: WaitCallback = None,
+    check_cancel: CancelCallback = None,
+    interval: float = 0.2,
+) -> None:
+    end_at = time.time() + max(seconds, 0.0)
+    while True:
+        _cooperate(wait_if_paused=wait_if_paused, check_cancel=check_cancel)
+        remaining = end_at - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(interval, remaining))
+
+
 def _extract_race_ids_from_html(html: str) -> List[str]:
     patterns = [
         r"race_id=(\d{12})",
@@ -198,17 +220,14 @@ def _extract_race_ids_from_html(html: str) -> List[str]:
         r'"race_id":"(\d{12})"',
         r"'race_id':'(\d{12})'",
     ]
-
     found = set()
     for pattern in patterns:
         found.update(re.findall(pattern, html))
-
     return sorted(found)
 
 
 def _extract_race_ids_from_dom(driver) -> List[str]:
     found = set()
-
     try:
         links = driver.find_elements(By.CSS_SELECTOR, "a[href*='race_id=']")
         for link in links:
@@ -216,11 +235,15 @@ def _extract_race_ids_from_dom(driver) -> List[str]:
             found.update(re.findall(r"race_id=(\d{12})", href))
     except Exception:
         pass
-
     return sorted(found)
 
 
-def _wait_for_page(driver) -> None:
+def _wait_for_page(
+    driver,
+    *,
+    wait_if_paused: WaitCallback = None,
+    check_cancel: CancelCallback = None,
+) -> None:
     try:
         WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.TAG_NAME, "body"))
@@ -228,22 +251,33 @@ def _wait_for_page(driver) -> None:
     except TimeoutException:
         pass
 
-    time.sleep(2.0)
+    _cooperative_sleep(2.0, wait_if_paused=wait_if_paused, check_cancel=check_cancel)
 
     try:
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.35);")
-        time.sleep(0.7)
+        _cooperative_sleep(0.7, wait_if_paused=wait_if_paused, check_cancel=check_cancel)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight * 0.7);")
-        time.sleep(0.7)
+        _cooperative_sleep(0.7, wait_if_paused=wait_if_paused, check_cancel=check_cancel)
         driver.execute_script("window.scrollTo(0, 0);")
-        time.sleep(0.5)
+        _cooperative_sleep(0.5, wait_if_paused=wait_if_paused, check_cancel=check_cancel)
     except Exception:
         pass
 
 
-def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> Tuple[List[str], str]:
+def _load_page_and_collect_ids(
+    driver,
+    url: str,
+    cache_name: str,
+    *,
+    status_callback: StatusCallback = None,
+    wait_if_paused: WaitCallback = None,
+    check_cancel: CancelCallback = None,
+) -> Tuple[List[str], str]:
+    _cooperate(wait_if_paused=wait_if_paused, check_cancel=check_cancel)
+    if status_callback:
+        status_callback(f"ページ取得中: {cache_name}")
     driver.get(url)
-    _wait_for_page(driver)
+    _wait_for_page(driver, wait_if_paused=wait_if_paused, check_cancel=check_cancel)
 
     html = driver.page_source or ""
     _write_cache(cache_name, html)
@@ -255,31 +289,62 @@ def _load_page_and_collect_ids(driver, url: str, cache_name: str) -> Tuple[List[
     return sorted(race_ids), html
 
 
-def _summarize_failure_html(html: str) -> str:
+def _classify_failure_html(html: str) -> Tuple[str, str]:
     if not html:
-        return "HTML未取得"
+        return "empty", "HTML未取得"
 
     lowered = html.lower()
 
     if "アクセスが集中" in html:
-        return "アクセス集中"
+        return "blocked", "アクセス集中"
+
     if "メンテナンス" in html:
-        return "メンテナンス表示"
+        return "maintenance", "メンテナンス表示"
+
+    if any(keyword in html for keyword in NO_RACE_KEYWORDS):
+        return "no_race", "開催なし"
+
     if "お探しのページは見つかりません" in html or "404" in lowered:
-        return "404相当"
+        return "not_found", "404相当"
+
     if "netkeiba" not in lowered:
-        return "想定外HTML"
+        return "unexpected", "想定外HTML"
 
-    return "race_id未検出"
+    return "no_race_id", "race_id未検出"
 
 
-def get_race_ids(date: str) -> List[str]:
+def _should_treat_as_no_race_day(primary_code: str, sub_codes: List[str]) -> bool:
+    if primary_code == "no_race":
+        return True
+
+    if primary_code == "not_found" and sub_codes:
+        allowed = {"not_found", "no_race", "unexpected", "empty"}
+        return all(code in allowed for code in sub_codes)
+
+    return False
+
+
+def get_race_ids(
+    date: str,
+    *,
+    driver=None,
+    allow_empty: bool = True,
+    status_callback: StatusCallback = None,
+    wait_if_paused: WaitCallback = None,
+    check_cancel: CancelCallback = None,
+) -> List[str]:
     normalized_date = _normalize_date(date)
-    driver = _build_driver()
+
+    own_driver = driver is None
+    if own_driver:
+        driver = _build_driver()
 
     try:
+        _cooperate(wait_if_paused=wait_if_paused, check_cancel=check_cancel)
         all_race_ids = set()
-        failure_notes = []
+        failure_notes: List[str] = []
+        primary_code = "empty"
+        sub_codes: List[str] = []
 
         primary_url = (
             f"https://race.netkeiba.com/top/race_list.html?kaisai_date={normalized_date}"
@@ -290,41 +355,71 @@ def get_race_ids(date: str) -> List[str]:
                 driver,
                 primary_url,
                 f"race_list_{normalized_date}",
+                status_callback=status_callback,
+                wait_if_paused=wait_if_paused,
+                check_cancel=check_cancel,
             )
             all_race_ids.update(ids)
+
             if not ids:
-                failure_notes.append(f"race_list={_summarize_failure_html(primary_html)}")
+                primary_code, primary_label = _classify_failure_html(primary_html)
+                failure_notes.append(f"race_list={primary_label}")
+            else:
+                primary_code = "ok"
+
         except WebDriverException as exc:
-            failure_notes.append(f"race_list=webdriver_error:{exc.__class__.__name__}")
+            primary_code = "webdriver_error"
+            failure_notes.append(
+                f"race_list=webdriver_error:{exc.__class__.__name__}"
+            )
 
         if not all_race_ids:
             for place_code in KAISAI_PLACE_CODES:
+                _cooperate(wait_if_paused=wait_if_paused, check_cancel=check_cancel)
                 sub_url = (
                     "https://race.netkeiba.com/top/race_list_sub.html"
                     f"?kaisai_date={normalized_date}&kaisai_place={place_code}"
                 )
+
                 try:
                     ids, sub_html = _load_page_and_collect_ids(
                         driver,
                         sub_url,
                         f"race_list_{normalized_date}_{place_code}",
+                        status_callback=status_callback,
+                        wait_if_paused=wait_if_paused,
+                        check_cancel=check_cancel,
                     )
                     all_race_ids.update(ids)
+
                     if ids:
+                        sub_codes.append("ok")
                         continue
-                    failure_notes.append(
-                        f"sub_{place_code}={_summarize_failure_html(sub_html)}"
-                    )
+
+                    sub_code, sub_label = _classify_failure_html(sub_html)
+                    sub_codes.append(sub_code)
+                    failure_notes.append(f"sub_{place_code}={sub_label}")
+
                 except WebDriverException as exc:
+                    sub_codes.append("webdriver_error")
                     failure_notes.append(
                         f"sub_{place_code}=webdriver_error:{exc.__class__.__name__}"
                     )
+
+                _cooperative_sleep(
+                    0.8,
+                    wait_if_paused=wait_if_paused,
+                    check_cancel=check_cancel,
+                )
 
         race_ids = sorted(all_race_ids)
         if race_ids:
             return race_ids
 
-        detail = " / ".join(failure_notes[:4]) if failure_notes else "詳細不明"
+        if allow_empty and _should_treat_as_no_race_day(primary_code, sub_codes):
+            return []
+
+        detail = " / ".join(failure_notes[:6]) if failure_notes else "詳細不明"
         raise RuntimeError(
             "レースIDを取得できませんでした。"
             f"日付={normalized_date}、診断={detail}。"
@@ -333,10 +428,79 @@ def get_race_ids(date: str) -> List[str]:
         )
 
     finally:
+        if own_driver and driver is not None:
+            driver.quit()
+
+
+def get_race_ids_by_date(
+    dates: Iterable[str],
+    *,
+    status_callback: StatusCallback = None,
+    wait_if_paused: WaitCallback = None,
+    check_cancel: CancelCallback = None,
+) -> Tuple[List[Tuple[str, List[str]]], List[str]]:
+    driver = _build_driver()
+    try:
+        normalized_dates = [_normalize_date(str(raw_date)) for raw_date in dates]
+        resolved: List[Tuple[str, List[str]]] = []
+        skipped_dates: List[str] = []
+        total = max(len(normalized_dates), 1)
+
+        for index, normalized_date in enumerate(normalized_dates, start=1):
+            _cooperate(wait_if_paused=wait_if_paused, check_cancel=check_cancel)
+            if status_callback:
+                status_callback(f"開催日判定中 ({index}/{total}): {normalized_date}")
+
+            race_ids = get_race_ids(
+                normalized_date,
+                driver=driver,
+                allow_empty=True,
+                status_callback=status_callback,
+                wait_if_paused=wait_if_paused,
+                check_cancel=check_cancel,
+            )
+            if race_ids:
+                resolved.append((normalized_date, race_ids))
+            else:
+                skipped_dates.append(normalized_date)
+
+            _cooperative_sleep(
+                1.2,
+                wait_if_paused=wait_if_paused,
+                check_cancel=check_cancel,
+            )
+
+        return resolved, skipped_dates
+    finally:
         driver.quit()
 
 
-def fetch_race_page(race_id: str, mode: str = "entry", use_cache: bool = True) -> str:
+def get_race_ids_for_dates(
+    dates: Iterable[str],
+    *,
+    status_callback: StatusCallback = None,
+    wait_if_paused: WaitCallback = None,
+    check_cancel: CancelCallback = None,
+) -> Tuple[List[str], List[str]]:
+    resolved, skipped_dates = get_race_ids_by_date(
+        dates,
+        status_callback=status_callback,
+        wait_if_paused=wait_if_paused,
+        check_cancel=check_cancel,
+    )
+    merged = sorted({race_id for _, race_ids in resolved for race_id in race_ids})
+    return merged, skipped_dates
+
+
+def fetch_race_page(
+    race_id: str,
+    mode: str = "entry",
+    use_cache: bool = True,
+    *,
+    status_callback: StatusCallback = None,
+    wait_if_paused: WaitCallback = None,
+    check_cancel: CancelCallback = None,
+) -> str:
     if not re.fullmatch(r"\d{12}", race_id):
         raise ValueError(f"race_id形式が不正です: {race_id}")
 
@@ -353,18 +517,25 @@ def fetch_race_page(race_id: str, mode: str = "entry", use_cache: bool = True) -
     if _HTML_CACHE_ENABLED and use_cache and os.path.exists(cache_path):
         return _read_cache(cache_name)
 
-    last_error = None
-    for _ in range(REQUEST_RETRY):
+    last_error: Optional[Exception] = None
+    for attempt in range(1, REQUEST_RETRY + 1):
+        _cooperate(wait_if_paused=wait_if_paused, check_cancel=check_cancel)
+        if status_callback:
+            status_callback(f"{mode}ページ取得中: {race_id} ({attempt}/{REQUEST_RETRY})")
         try:
-            res = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            res.raise_for_status()
-            res.encoding = res.apparent_encoding or "utf-8"
-            html = res.text
+            response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            response.encoding = response.apparent_encoding or "utf-8"
+            html = response.text
             _write_cache(cache_name, html)
             return html
         except Exception as exc:
             last_error = exc
-            time.sleep(SLEEP_BETWEEN_RETRY)
+            _cooperative_sleep(
+                SLEEP_BETWEEN_RETRY,
+                wait_if_paused=wait_if_paused,
+                check_cancel=check_cancel,
+            )
 
     raise RuntimeError(
         f"レースページ取得失敗: race_id={race_id}, mode={mode}, error={last_error}"
